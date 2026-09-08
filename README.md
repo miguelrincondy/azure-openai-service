@@ -1,64 +1,64 @@
 # azure-openai-service
 
-**azure-openai-service** es un servicio backend en Python (FastAPI) que expone un endpoint HTTP para consumir modelos de **Azure OpenAI**. El proyecto sirve como caso de validación de instrumentación: la observabilidad completa —trazas distribuidas, métricas de consumo de tokens y latencia— la aporta **Dynatrace OneAgent** mediante inyección de código a nivel de proceso (zero-code), sin necesidad de SDKs de instrumentación ni cambios en el código de la aplicación.
+**azure-openai-service** es un servicio backend en Python (FastAPI) que expone un endpoint HTTP para consumir modelos de **Azure OpenAI**. El proyecto sirve como caso de validación de instrumentación: la observabilidad completa —trazas distribuidas, métricas de consumo de tokens y latencia— la aporta **OpenLLMetry (Traceloop SDK)**, una capa de auto-instrumentación sobre OpenTelemetry especializada en aplicaciones GenAI.
 
 ## Estructura
 
 ```
 app/
   main.py           # FastAPI: endpoints /health y /chat
-  openai_client.py  # cliente Azure OpenAI (API Key o Managed Identity), sin instrumentación manual
-  config.py         # configuración vía variables de entorno
-Dockerfile          # incluye la inyección del code module de OneAgent (dominio parametrizado por ARG)
+  openai_client.py  # cliente Azure OpenAI (API Key o Managed Identity)
+  telemetry.py       # inicialización de OpenLLMetry (Traceloop)
+  config.py          # configuración vía variables de entorno
+Dockerfile
 requirements.txt
 .env.example
 .gitignore
 .dockerignore
 ```
 
-## Instrumentación con OneAgent (zero-code)
+## Instrumentación con OpenLLMetry (Traceloop)
 
-Según la [guía oficial](https://docs.dynatrace.com/docs/observe/dynatrace-for-ai-observability/get-started/oneagent), OneAgent captura automáticamente atributos GenAI (modelo, tokens, latencia, y opcionalmente el prompt) sin ningún wrapper de SDK.
+A diferencia de Dynatrace OneAgent (que requiere inyectar un code module desde el registro Docker de tu entorno, con `docker login` y credenciales de build-time), **OpenLLMetry es una librería de Python** (`traceloop-sdk`) que se instala como cualquier dependencia y parchea automáticamente el SDK de OpenAI/Azure OpenAI en tiempo de ejecución. No hay ningún registro Docker que resolver, ni credenciales en el build de la imagen — solo un endpoint OTLP y un token de ingesta.
 
-### El dominio de Dynatrace es un build-arg, no está hardcodeado
+### 1. Generar el Access Token en Dynatrace
 
-El `Dockerfile` declara `ARG DT_ENVIRONMENT_URL` y lo usa en:
+En Dynatrace: **Access Tokens** (Ctrl/Cmd+K → buscar "Access Tokens") → **Generate new token**. Selecciona estos scopes:
 
-```dockerfile
-ARG DT_ENVIRONMENT_URL
-COPY --from=${DT_ENVIRONMENT_URL}/linux/oneagent-codemodules:python / /
-ENV LD_PRELOAD=/opt/dynatrace/oneagent/agent/lib64/liboneagentproc.so
+- `openTelemetryTrace.ingest`
+- `metrics.ingest`
+- `logs.ingest`
+
+Copia el token generado — solo se muestra una vez.
+
+### 2. Configurar el endpoint OTLP
+
+El endpoint sigue el patrón `https://<tu-environment-id>.<tu-dominio>/api/v2/otlp`. Para tu ambiente:
+
+```
+DT_OTLP_ENDPOINT=https://yaj06303.sprint.dynatracelabs.com/api/v2/otlp
+DT_API_TOKEN=<el-token-generado-en-el-paso-1>
 ```
 
-Esto evita tener que editar y commitear el Dockerfile por cada entorno Dynatrace — el valor se pasa en el momento del build (ver sección de despliegue).
+Estos van como variables de entorno del contenedor (nunca en un archivo del repo — ver sección de despliegue).
 
-`<DT_ENVIRONMENT_URL>` es uno de:
-- SaaS: `<tu-environment-id>.live.dynatrace.com`
-- ActiveGate: `<activegate-address>:9999`
+### 3. Cómo funciona en el código
 
-### Versión mínima requerida del SDK
+`app/telemetry.py` inicializa Traceloop al arrancar la app:
 
-Según la tabla **"Generative AI Application frameworks"** de Dynatrace (Technology support), la instrumentación automática de OpenAI/Azure OpenAI requiere:
+```python
+from traceloop.sdk import Traceloop
 
-| Framework | Versión mínima |
-|---|---|
-| `openai` (Python SDK) | **1.54.0+** (captura de prompts soportada desde OneAgent 1.335) |
+Traceloop.init(
+    app_name=settings.service_name,
+    api_endpoint=settings.dt_otlp_endpoint,
+    headers={"Authorization": f"Api-Token {settings.dt_api_token}"},
+)
+```
 
-`requirements.txt` ya está fijado a `openai>=1.54.0`.
+A partir de ahí, cada llamada a `client.chat.completions.create(...)` en `openai_client.py` queda automáticamente instrumentada: modelo, tokens de prompt/completion, latencia y (opcionalmente) el contenido del prompt viajan como atributos del span, sin código adicional de nuestra parte.
 
-### Habilitar las features de OneAgent (en la UI de Dynatrace)
-
-En **Settings** → **Collect and capture** → **General monitoring settings** → **OneAgent features**, filtra por "Python" y habilita:
-
-| Feature | Obligatoria |
-|---|---|
-| Python OpenAI | Sí — instrumenta el SDK y habilita el monitoreo |
-| Python FastAPI | Sí — crea el span de entrada HTTP donde anida la llamada a OpenAI |
-| Python OpenAI prompt capture | Opcional — captura el texto del prompt y la respuesta |
-
-Después de habilitarlas, **reinicia la aplicación** (las features se aplican al arrancar el proceso).
-
-### Enviar tráfico y observar
+### 4. Enviar tráfico y observar
 
 ```bash
 curl -X POST https://<fqdn-del-container-app>/chat \
@@ -66,18 +66,14 @@ curl -X POST https://<fqdn-del-container-app>/chat \
   -d '{"prompt": "Explica qué es la observabilidad en una frase"}'
 ```
 
-Luego en Dynatrace:
-- **AI Observability → Explorer**: el servicio aparece como AI service tras la primera request instrumentada, con conteo de requests y uso de tokens agregado.
-- **Distributed Tracing**: el span de entrada HTTP (FastAPI) contiene como hijo el span de la llamada a Azure OpenAI, con `gen_ai.provider`, `gen_ai.model`, `gen_ai.usage.input_tokens` / `output_tokens`.
+En Dynatrace: **Distributed Tracing** → busca el servicio por su `app_name` (el mismo valor de `SERVICE_NAME`). El span de la llamada a Azure OpenAI aparece con los atributos GenAI estándar (`gen_ai.*`).
 
-## 1. Ejecutar localmente (opcional, sin OneAgent)
-
-Si en algún momento tienes Python disponible localmente y quieres probar rápido sin instrumentación:
+## 1. Ejecutar localmente (opcional)
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # completa AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_DEPLOYMENT, AZURE_OPENAI_API_KEY (nunca subas este .env — ya está en .gitignore)
+cp .env.example .env   # completa los valores reales; .env ya está en .gitignore
 export $(grep -v '^#' .env | xargs)
 uvicorn app.main:app --reload --port 8000
 ```
@@ -89,61 +85,34 @@ curl -X POST http://localhost:8000/chat \
   -d '{"prompt": "Explica qué es la observabilidad en una frase", "max_tokens": 100}'
 ```
 
-## 2. Construir la imagen (sin Docker local, vía ACR Task)
+## 2. Construir la imagen
 
-Todo esto se ejecuta desde **Azure Cloud Shell** (portal.azure.com → icono `>_`), sin instalar nada.
-
-```bash
-RG=rg-azure-openai-demo
-LOCATION=eastus2
-ACR_NAME=acraoservicedemo   # único globalmente
-REPO_URL=https://github.com/<tu-usuario>/azure-openai-service.git
-
-# 1. Resource group + ACR
-az group create -n $RG -l $LOCATION
-az acr create -n $ACR_NAME -g $RG --sku Basic
-
-# 2. Crear la ACR Task apuntando al repo (el dominio de Dynatrace va como --arg)
-az acr task create \
-  --registry $ACR_NAME --name build-oneagent \
-  --image azure-openai-service:{{.Run.ID}} \
-  --context "$REPO_URL#main" --file Dockerfile \
-  --arg DT_ENVIRONMENT_URL=<tu-environment-id>.live.dynatrace.com \
-  --git-access-token <tu-PAT-de-GitHub>
-
-# 3. Registrar la credencial del registro de Dynatrace en la Task
-az acr task credential add \
-  --name build-oneagent --registry $ACR_NAME \
-  --login-server <tu-environment-id>.live.dynatrace.com \
-  --username <DT_ENVIRONMENT_ID> --password <tu-PaaS-Token>
-
-# 4. Ejecutar el build remoto (push automático al ACR al terminar)
-az acr task run --registry $ACR_NAME --name build-oneagent
-```
-
-Verifica que la imagen quedó:
+Sin OneAgent, el Dockerfile ya no necesita ningún build-arg ni login especial — cualquier método de build sirve, incluyendo `az acr build` (build remoto ad-hoc, mucho más simple que la ACR Task que usábamos antes):
 
 ```bash
-az acr repository show-tags --name $ACR_NAME --repository azure-openai-service
+az acr build --registry acrmrincon --image azure-openai-service:latest .
 ```
 
-> Si en algún momento sí tienes Docker disponible, la alternativa clásica es `docker login <DT_ENVIRONMENT_URL> -u <DT_ENVIRONMENT_ID>` + `docker build --build-arg DT_ENVIRONMENT_URL=<...> -t ... .` + `docker push` — el `ARG` del Dockerfile funciona igual en ambos flujos.
+(O `docker build` local si tienes Docker disponible.)
 
 ## 3. Desplegar en Azure Container Apps
 
 ```bash
+RG=rg-mrincon-azure-openai-demo
+LOCATION=eastus2
+ACR_NAME=acrmrincon
 CAE_NAME=cae-azure-openai-demo
 APP_NAME=azure-openai-service
+
+az containerapp env create -n $CAE_NAME -g $RG -l $LOCATION
 
 # Variables reales solo en la sesión de shell, nunca en archivos
 export AZURE_OPENAI_ENDPOINT="https://<tu-recurso>.openai.azure.com"
 export AZURE_OPENAI_DEPLOYMENT="<tu-deployment>"
 export AZURE_OPENAI_KEY="<tu-api-key>"
+export DT_OTLP_ENDPOINT="https://yaj06303.sprint.dynatracelabs.com/api/v2/otlp"
+export DT_API_TOKEN="<tu-access-token-con-scopes-de-ingesta>"
 
-# Entorno de Container Apps
-az containerapp env create -n $CAE_NAME -g $RG -l $LOCATION
-
-# Deploy (modo API Key para empezar)
 az containerapp create \
   --name $APP_NAME \
   --resource-group $RG \
@@ -156,8 +125,9 @@ az containerapp create \
       AZURE_OPENAI_ENDPOINT=$AZURE_OPENAI_ENDPOINT \
       AZURE_OPENAI_DEPLOYMENT=$AZURE_OPENAI_DEPLOYMENT \
       AUTH_MODE=api_key \
-  --secrets azure-openai-key=$AZURE_OPENAI_KEY \
-  --env-vars AZURE_OPENAI_API_KEY=secretref:azure-openai-key
+      DT_OTLP_ENDPOINT=$DT_OTLP_ENDPOINT \
+  --secrets azure-openai-key=$AZURE_OPENAI_KEY dt-api-token=$DT_API_TOKEN \
+  --env-vars AZURE_OPENAI_API_KEY=secretref:azure-openai-key DT_API_TOKEN=secretref:dt-api-token
 ```
 
 Obtén la URL pública:
@@ -170,7 +140,7 @@ az containerapp show -n $APP_NAME -g $RG --query properties.configuration.ingres
 
 Controlado por `AUTH_MODE`:
 
-- **`api_key`** (por defecto): simple para pruebas, la key va como *secret* de Container Apps (como en el ejemplo de arriba).
+- **`api_key`** (por defecto): simple para pruebas, la key va como *secret* de Container Apps.
 - **`managed_identity`**: usa `DefaultAzureCredential`, sin ninguna key en el servicio. Requiere:
   1. `az containerapp identity assign --system-assigned -n $APP_NAME -g $RG`
   2. Asignar el rol `Cognitive Services OpenAI User` sobre el recurso de Azure OpenAI a esa identidad.
@@ -178,6 +148,6 @@ Controlado por `AUTH_MODE`:
 
 ## Notas
 
-- `/health` no llama a Azure OpenAI, solo confirma que el proceso está arriba (útil para probes de Container Apps).
-- El Dockerfile corre el proceso como root: OneAgent inyectado vía `LD_PRELOAD` necesita escribir en `/opt/dynatrace`, así que se dejó así para evitar fallos de permisos. Si quieres correr como usuario no-root, habría que ajustar los permisos de `/opt/dynatrace` explícitamente.
-- Requisitos del lado Dynatrace: SaaS con licencia Dynatrace Platform Subscription (DPS), y una versión de OneAgent que soporte el SDK de OpenAI (ver [support matrix](https://docs.dynatrace.com/docs/ingest-from/technology-support/oneagent-platform-and-capability-support-matrix)).
+- `/health` no llama a Azure OpenAI ni depende de Dynatrace — solo confirma que el proceso está arriba.
+- Dynatrace solo acepta métricas OTLP en formato **delta**; si en algún momento agregas métricas custom, recuerda `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=DELTA`.
+- Si `DT_OTLP_ENDPOINT` o `DT_API_TOKEN` no están configurados, el servicio sigue funcionando normalmente (llama a Azure OpenAI igual) — simplemente no reporta datos a Dynatrace.

@@ -5,9 +5,12 @@ from pydantic import BaseModel
 
 from app.config import settings
 from app.openai_client import chat_completion
+from app.telemetry import setup_telemetry
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+setup_telemetry()
 
 app = FastAPI(title="Azure OpenAI Service", version=settings.service_version)
 

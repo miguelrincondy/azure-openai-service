@@ -1,9 +1,10 @@
 """
 Wrapper simple sobre el SDK de Azure OpenAI.
 
-Sin instrumentación manual: OneAgent instrumenta automáticamente el SDK de
-OpenAI (feature "Python OpenAI") y el framework web (feature "Python FastAPI"),
-capturando modelo, tokens y latencia sin cambios de código. Ver README.md.
+Sin instrumentación manual: OpenLLMetry (Traceloop SDK) parchea
+automáticamente el cliente de OpenAI/Azure OpenAI al inicializarse en
+app/telemetry.py, capturando modelo, tokens y latencia sin cambios de
+código aquí. Ver README.md.
 """
 import logging
 
@@ -49,10 +50,10 @@ def get_client() -> AzureOpenAI:
 def chat_completion(prompt: str, max_tokens: int = 256) -> dict:
     """Llama al deployment configurado y devuelve texto + uso de tokens.
 
-    OneAgent crea automáticamente un span hijo del entry-point HTTP con los
+    OpenLLMetry crea automáticamente un span para esta llamada con los
     atributos gen_ai.provider, gen_ai.model, gen_ai.usage.input_tokens /
-    output_tokens — visibles en AI Observability > Explorer y en Distributed
-    Tracing, sin que este código necesite reportarlos.
+    output_tokens — visibles en Distributed Tracing, sin que este código
+    necesite reportarlos.
     """
     client = get_client()
 

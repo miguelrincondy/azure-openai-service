@@ -61,7 +61,7 @@ def chat_completion(prompt: str, max_tokens: int = 256) -> dict:
         response = client.chat.completions.create(
             model=settings.azure_openai_deployment,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=max_tokens,
+            max_completion_tokens=max_tokens,
         )
     except Exception:
         logger.exception("Error llamando a Azure OpenAI")

@@ -1,0 +1,14 @@
+# Secretos y configuración local — nunca deben subirse al repo
+.env
+*.env
+!.env.example
+ 
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+ 
+# Editor / OS
+.vscode/
+.DS_Store

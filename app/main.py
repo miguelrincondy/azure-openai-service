@@ -23,7 +23,6 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     text: str
     usage: dict
-    duration_ms: float
 
 
 @app.get("/health")

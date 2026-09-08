@@ -1,6 +1,6 @@
 # azure-openai-service
 
-Servicio de prueba en Python (FastAPI) que consume tokens de **Azure OpenAI**, pensado para probarse desde tu laptop vía API. La observabilidad se hace con **Dynatrace OneAgent** (zero-code): sin SDKs de instrumentación ni cambios en el código de la app.
+**azure-openai-service** es un servicio backend en Python (FastAPI) que expone un endpoint HTTP para consumir modelos de **Azure OpenAI**. El proyecto sirve como caso de validación de instrumentación: la observabilidad completa —trazas distribuidas, métricas de consumo de tokens y latencia— la aporta **Dynatrace OneAgent** mediante inyección de código a nivel de proceso (zero-code), sin necesidad de SDKs de instrumentación ni cambios en el código de la aplicación.
 
 ## Estructura
 
